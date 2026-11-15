@@ -1,0 +1,4 @@
+trades.csv
+backtest_results.csv
+__pycache__/
+.env
