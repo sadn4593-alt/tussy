@@ -60,8 +60,8 @@ PUBLIC_WS = "wss://api.derivws.com/trading/v1/options/ws/public"
 class Cfg:
     stake: float = 1.0                # USD per trade (your max loss per trade is this)
     multiplier: int = 100             # must be one Deriv allows for the symbol
-    tp_atr: float = 1.0               # take profit = 1.0 ATR move
-    sl_atr: float = 1.5               # stop loss   = 1.5 ATR move
+    tp_atr: float = 3.0               # take profit = 3 ATR move (small targets get eaten by costs)
+    sl_atr: float = 3.0               # stop loss   = 3 ATR move
     min_score: int = 3                # signals that must agree (of 4)
     min_er: float = 0.20              # efficiency ratio floor (skip chop)
     session_start: int = 7            # UTC hours allowed
@@ -552,8 +552,8 @@ def main():
     ap.add_argument("--account-id")
     ap.add_argument("--stake", type=float, default=1.0)
     ap.add_argument("--multiplier", type=int, default=100)
-    ap.add_argument("--tp-atr", type=float, default=1.0)
-    ap.add_argument("--sl-atr", type=float, default=1.5)
+    ap.add_argument("--tp-atr", type=float, default=3.0)
+    ap.add_argument("--sl-atr", type=float, default=3.0)
     ap.add_argument("--min-score", type=int, default=3)
     a = ap.parse_args()
     cfg = Cfg(stake=a.stake, multiplier=a.multiplier, tp_atr=a.tp_atr, sl_atr=a.sl_atr, min_score=a.min_score)

@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Gold &amp; Forex Scalper</title>
+<style>
+  :root { --bg:#0f1117; --card:#181b24; --line:#2a2f3c; --text:#e8eaf0; --mute:#8b92a5; --accent:#ff444f; --up:#2ecc8f; --down:#ff5c6c; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.45 -apple-system,system-ui,Segoe UI,Roboto,sans-serif; padding:16px; padding-bottom:40px; }
+  main { max-width:560px; margin:0 auto; }
+  h1 { font-size:20px; margin:4px 0 2px; }
+  .sub { color:var(--mute); font-size:13px; margin-bottom:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:12px; }
+  label { display:block; font-size:12px; color:var(--mute); margin:10px 0 4px; }
+  input[type=text], input[type=password], input[type=number] { width:100%; padding:11px; border-radius:8px; border:1px solid var(--line); background:#0f1117; color:var(--text); font-size:16px; }
+  .row { display:flex; gap:10px; } .row > div { flex:1; }
+  .check { display:flex; align-items:center; gap:8px; margin-top:12px; font-size:14px; }
+  button { width:100%; padding:13px; border:0; border-radius:10px; font-size:16px; font-weight:600; background:var(--accent); color:#fff; margin-top:14px; }
+  button.secondary { background:#2a2f3c; } button:disabled { opacity:.5; }
+  .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; text-align:center; }
+  .stat b { display:block; font-size:18px; } .stat span { font-size:11px; color:var(--mute); }
+  .up { color:var(--up); } .down { color:var(--down); }
+  .status { font-size:13px; color:var(--mute); margin-top:10px; }
+  .warn { font-size:12px; color:#f5b942; margin-top:8px; }
+  #log { font:12px/1.5 ui-monospace,Menlo,monospace; max-height:230px; overflow:auto; white-space:pre-wrap; color:#b8bfd0; }
+  table { width:100%; border-collapse:collapse; font-size:12px; } td,th { padding:5px 4px; border-bottom:1px solid var(--line); text-align:left; }
+  th { color:var(--mute); font-weight:500; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Gold &amp; Forex Scalper</h1>
+  <div class="sub">Runs in this browser tab. Trades Deriv multipliers with a take-profit and stop-loss on every trade.</div>
+
+  <div class="card" id="setup">
+    <label>Personal Access Token (trade scope)</label>
+    <input type="password" id="token" autocomplete="off" placeholder="paste your token">
+    <label>App ID</label>
+    <input type="text" id="appid" inputmode="numeric" autocomplete="off" placeholder="your Deriv app id">
+    <label>Symbols (comma separated)</label>
+    <input type="text" id="symbols" value="frxXAUUSD,frxEURUSD" autocapitalize="off">
+    <div class="row">
+      <div><label>Stake per trade (USD)</label><input type="number" id="stake" value="1" step="0.5" min="0.35"></div>
+      <div><label>Multiplier</label><input type="number" id="mult" value="100" step="10" min="1"></div>
+    </div>
+    <div class="check"><input type="checkbox" id="real"><label for="real" style="margin:0;color:var(--text)">Use REAL money (off = demo account)</label></div>
+    <button id="startBtn">Start bot</button>
+    <button id="stopBtn" class="secondary" style="display:none">Stop bot</button>
+    <div class="warn">Keep this page open and the screen on. If the page closes, the bot stops, but trades already open keep their take-profit and stop-loss on Deriv's side. Your token stays in this tab only: it isn't saved anywhere.</div>
+  </div>
+
+  <div class="card" id="dash" style="display:none">
+    <div class="stats">
+      <div class="stat"><b id="bal">-</b><span>Balance</span></div>
+      <div class="stat"><b id="day">-</b><span>Today P&amp;L</span></div>
+      <div class="stat"><b id="cnt">0</b><span>Trades today</span></div>
+    </div>
+    <div class="status" id="status">Starting...</div>
+  </div>
+
+  <div class="card" id="openCard" style="display:none"><b>Open trades</b><table id="open"></table></div>
+  <div class="card" id="histCard" style="display:none"><b>Recent trades</b><table id="hist"></table>
+    <button class="secondary" id="csvBtn" style="margin-top:10px">Download trades (CSV)</button></div>
+  <div class="card"><b>Log</b><div id="log"></div></div>
+  <div class="sub">Educational software, not financial advice. No bot can promise it never loses; start on demo.</div>
+</main>
+
+<script src="strategy.js"></script>
+<script>
+const PUBLIC_WS = 'wss://api.derivws.com/trading/v1/options/ws/public';
+const $ = (id) => document.getElementById(id);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const now = () => Math.floor(Date.now() / 1000);
+
+let tok = '', app = '', cfg = null, symbols = [], real = false;
+let running = false, auth = null, pub = null, risk = null, acct = null, wakeLock = null, balance = 0;
+const bars = {}, cur = {}, cool = {}, mult = {}, open = {};
+let tradesToday = 0;
+
+function log(m) {
+  const t = new Date().toISOString().slice(11, 19);
+  const el = $('log'); el.textContent += `[${t}] ${m}\n`; el.scrollTop = el.scrollHeight;
+  if (el.textContent.length > 20000) el.textContent = el.textContent.slice(-12000);
+}
+function setStatus(s) { $('status').textContent = s; }
+const money = (x) => (x >= 0 ? '+' : '-') + '$' + Math.abs(x).toFixed(2);
+
+async function api(path, body) {
+  const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-token': tok, 'x-app-id': app }, body: JSON.stringify(body || {}) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error('Deriv said: ' + JSON.stringify(j).slice(0, 300));
+  return j;
+}
+
+class Conn {
+  constructor(url, name) { this.url = url; this.name = name; this.rid = 0; this.pending = {}; this.handlers = {}; this.closed = false; }
+  open() {
+    return new Promise((resolve, reject) => {
+      const ws = (this.ws = new WebSocket(this.url));
+      ws.onopen = () => { this.timer = setInterval(() => { try { ws.send('{"ping":1}'); } catch (e) {} }, 25000); resolve(); };
+      ws.onerror = () => reject(new Error(this.name + ' connection failed'));
+      ws.onmessage = (e) => {
+        const m = JSON.parse(e.data), p = this.pending[m.req_id];
+        if (p) { delete this.pending[m.req_id]; p(m); }
+        const h = this.handlers[m.msg_type]; if (h) h(m);
+      };
+      ws.onclose = () => { clearInterval(this.timer); this.closed = true; if (this.onclose) this.onclose(); };
+    });
+  }
+  call(payload, timeout = 20000) {
+    return new Promise((resolve, reject) => {
+      const id = ++this.rid;
+      const t = setTimeout(() => { delete this.pending[id]; reject(new Error(this.name + ' timeout')); }, timeout);
+      this.pending[id] = (m) => { clearTimeout(t); m.error ? reject(new Error(this.name + ': ' + (m.error.message || JSON.stringify(m.error)))) : resolve(m); };
+      this.ws.send(JSON.stringify({ ...payload, req_id: id }));
+    });
+  }
+  close() { try { this.ws.close(); } catch (e) {} }
+}
+
+/* ---------- connect / reconnect ---------- */
+async function connect() {
+  const accts = (await api('/api/accounts')).data || [];
+  log('Accounts: ' + accts.map((a) => a.account_id + ' (' + a.account_type + ')').join(', '));
+  acct = accts.find((a) => (a.account_type === 'demo') !== real);
+  if (!acct) throw new Error(real ? 'No real account found' : 'No demo account found. Create one in Deriv first.');
+  const url = (await api('/api/otp', { accountId: acct.account_id })).data.url;
+  auth = new Conn(url, 'trade'); pub = new Conn(PUBLIC_WS, 'public');
+  await Promise.all([auth.open(), pub.open()]);
+  auth.handlers.proposal_open_contract = onPoc;
+  pub.handlers.tick = onTick;
+  auth.onclose = pub.onclose = () => { if (running) reconnectLoop(); };
+  const b = (await auth.call({ balance: 1 })).balance;
+  balance = Number(b.balance);
+  if (!risk) risk = new Strat.Risk(cfg, balance);
+  $('bal').textContent = '$' + balance.toFixed(2);
+  log(`Connected to ${real ? 'REAL' : 'DEMO'} account ${acct.account_id}, balance $${balance.toFixed(2)}`);
+  for (const s of symbols) {
+    if (!(s in mult)) {
+      try { const cf = await pub.call({ contracts_for: s }); mult[s] = Strat.pickMultiplier(cf.contracts_for.available, cfg.multiplier); }
+      catch (e) { log(`${s}: could not read contracts (${e.message}); using multiplier ${cfg.multiplier}`); mult[s] = cfg.multiplier; }
+      log(`${s}: multiplier ${mult[s]}`);
+    }
+    await warmUp(s);
+    await pub.call({ ticks: s, subscribe: 1 });
+  }
+  for (const cid of Object.keys(open)) { try { await auth.call({ proposal_open_contract: 1, contract_id: Number(cid), subscribe: 1 }); } catch (e) {} }
+  setStatus('Running. Waiting for a setup...');
+}
+
+let reconnecting = false;
+async function reconnectLoop() {
+  if (reconnecting) return; reconnecting = true;
+  while (running) {
+    log('Connection lost. Reconnecting in 8s (open trades keep their TP/SL on Deriv).');
+    try { auth && auth.close(); pub && pub.close(); } catch (e) {}
+    await sleep(8000);
+    if (!running) break;
+    try { for (const s of symbols) cur[s] = null; await connect(); break; } catch (e) { log('Reconnect failed: ' + e.message); }
+  }
+  reconnecting = false;
+}
+
+async function warmUp(s) {
+  bars[s] = bars[s] || []; cool[s] = cool[s] || 0;
+  try {
+    const m = await pub.call({ ticks_history: s, count: 300, end: 'latest', style: 'candles', granularity: 60, adjust_start_time: 1 });
+    const cs = (m.candles || []).slice(0, -1).map((c) => ({ t: c.epoch, o: +c.open, h: +c.high, l: +c.low, c: +c.close }));
+    if (cs.length) bars[s] = cs;
+    log(`${s}: loaded ${bars[s].length} candles`);
+  } catch (e) { log(`${s}: no history (${e.message}). Will need about ${Strat.MIN_BARS} minutes of live data before trading.`); }
+}
+
+/* ---------- ticks -> candles -> signals ---------- */
+async function onTick(m) {
+  const t = m.tick, s = t.symbol, q = +t.quote, minute = Math.floor(t.epoch / 60);
+  const b = cur[s];
+  if (b && b.minute === minute) { b.h = Math.max(b.h, q); b.l = Math.min(b.l, q); b.c = q; return; }
+  if (b) {
+    bars[s].push({ t: b.minute * 60, o: b.o, h: b.h, l: b.l, c: b.c });
+    if (bars[s].length > 500) bars[s].shift();
+    for (const st of Object.values(open)) if (st.symbol === s) st.bars++;
+    await onBar(s, t.epoch);
+  }
+  cur[s] = { minute, o: q, h: q, l: q, c: q };
+}
+
+async function onBar(s, ts) {
+  if (cool[s] > 0) { cool[s]--; return; }
+  if (Object.values(open).some((o) => o.symbol === s)) return;
+  const d = new Date(ts * 1000);
+  if (d.getUTCDay() === 0 || d.getUTCDay() === 6 || d.getUTCHours() < cfg.session_start || d.getUTCHours() >= cfg.session_end) { setStatus('Outside London/NY hours or weekend. Standing by.'); return; }
+  const [ok, why] = risk.canTrade(ts, Object.keys(open).length);
+  if (!ok) { setStatus(why); return; }
+  setStatus('Running. Scanning ' + s + '...');
+  const sg = Strat.signal(bars[s], cfg);
+  if (sg.dir) await enter(s, sg, bars[s][bars[s].length - 1].c);
+}
+
+/* ---------- trading ---------- */
+async function enter(s, sg, price) {
+  const mu = mult[s] || cfg.multiplier;
+  const c2 = { ...cfg, multiplier: mu };
+  const { tp, sl } = Strat.dollarLevels(price, sg.atr, c2);
+  const params = { amount: cfg.stake, basis: 'stake', contract_type: sg.dir > 0 ? 'MULTUP' : 'MULTDOWN', currency: acct.currency || 'USD',
+    multiplier: mu, underlying_symbol: s, limit_order: { take_profit: tp, stop_loss: sl } };
+  let b;
+  try {
+    try { b = await auth.call({ buy: '1', price: cfg.stake, parameters: params }); }
+    catch (e1) {
+      log(`${s}: direct buy refused (${e1.message}); trying proposal flow`);
+      const p = await auth.call({ proposal: 1, subscribe: 1, ...params });
+      b = await auth.call({ buy: p.proposal.id, price: p.proposal.ask_price });
+      if (p.subscription && p.subscription.id) auth.call({ forget: p.subscription.id }).catch(() => {});
+    }
+  } catch (e) { log(`${s}: entry failed: ${e.message}`); return; }
+  const cid = b.buy.contract_id;
+  open[cid] = { symbol: s, dir: sg.dir, tp, sl, peak: 0, bars: 0, selling: false, profit: 0, since: now() };
+  cool[s] = cfg.cooldown_bars;
+  auth.call({ proposal_open_contract: 1, contract_id: cid, subscribe: 1 }).catch((e) => log('subscribe failed: ' + e.message));
+  log(`OPEN ${sg.dir > 0 ? 'BUY' : 'SELL'} ${s} score ${sg.score} TP $${tp} SL $${sl}`);
+  renderOpen();
+}
+
+async function onPoc(m) {
+  const poc = m.proposal_open_contract || {}, st = open[poc.contract_id];
+  if (!st) return;
+  const profit = parseFloat(poc.profit || 0);
+  if (poc.is_sold || ['sold', 'won', 'lost'].includes(poc.status)) {
+    delete open[poc.contract_id];
+    risk.onClose(profit, now()); tradesToday++;
+    saveTrade({ time: new Date().toISOString(), symbol: st.symbol, dir: st.dir > 0 ? 'BUY' : 'SELL', tp: st.tp, sl: st.sl, peak: +st.peak.toFixed(2), pnl: +profit.toFixed(2) });
+    log(`CLOSED ${st.symbol} ${money(profit)} | today ${money(risk.dayPnl)}`);
+    updateDash(); renderOpen(); renderHist(); return;
+  }
+  st.profit = profit; st.peak = Math.max(st.peak, profit);
+  renderOpen();
+  if (!st.selling && Strat.manageExit(profit, st.peak, st.tp, st.bars, cfg)) {
+    st.selling = true;
+    try { await auth.call({ sell: Number(poc.contract_id), price: 0 }); }
+    catch (e) { st.selling = false; log('sell failed: ' + e.message); }
+  }
+}
+
+/* ---------- UI ---------- */
+function updateDash() {
+  if (!risk) return;
+  const el = $('day'); el.textContent = money(risk.dayPnl); el.className = risk.dayPnl >= 0 ? 'up' : 'down';
+  $('cnt').textContent = tradesToday;
+  $('bal').textContent = '$' + (risk.start + risk.dayPnl).toFixed(2);
+}
+function renderOpen() {
+  const rows = Object.values(open);
+  $('openCard').style.display = rows.length ? '' : 'none';
+  $('open').innerHTML = '<tr><th>Symbol</th><th>Side</th><th>P&L</th><th>TP / SL</th></tr>' +
+    rows.map((o) => `<tr><td>${o.symbol.replace('frx', '')}</td><td>${o.dir > 0 ? 'BUY' : 'SELL'}</td><td class="${o.profit >= 0 ? 'up' : 'down'}">${money(o.profit)}</td><td>$${o.tp} / $${o.sl}</td></tr>`).join('');
+}
+function getTrades() { try { return JSON.parse(localStorage.getItem('trades') || '[]'); } catch (e) { return []; } }
+function saveTrade(t) { try { const a = getTrades(); a.push(t); localStorage.setItem('trades', JSON.stringify(a.slice(-500))); } catch (e) {} }
+function renderHist() {
+  const a = getTrades().slice(-12).reverse();
+  $('histCard').style.display = a.length ? '' : 'none';
+  $('hist').innerHTML = '<tr><th>Time</th><th>Symbol</th><th>Side</th><th>P&L</th></tr>' +
+    a.map((t) => `<tr><td>${t.time.slice(5, 16).replace('T', ' ')}</td><td>${t.symbol.replace('frx', '')}</td><td>${t.dir}</td><td class="${t.pnl >= 0 ? 'up' : 'down'}">${money(t.pnl)}</td></tr>`).join('');
+}
+$('csvBtn').onclick = () => {
+  const a = getTrades();
+  const csv = 'time,symbol,dir,tp,sl,peak,pnl\n' + a.map((t) => [t.time, t.symbol, t.dir, t.tp, t.sl, t.peak, t.pnl].join(',')).join('\n');
+  const l = document.createElement('a'); l.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); l.download = 'trades.csv'; l.click();
+};
+
+async function keepAwake() {
+  try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+}
+document.addEventListener('visibilitychange', () => { if (running && document.visibilityState === 'visible') keepAwake(); });
+
+/* ---------- start / stop ---------- */
+$('startBtn').onclick = async () => {
+  tok = $('token').value.trim(); app = $('appid').value.trim(); real = $('real').checked;
+  if (!tok || !app) return alert('Paste your token and app ID first.');
+  if (real && prompt('REAL MONEY mode. Type YES to continue.') !== 'YES') return;
+  const stake = parseFloat($('stake').value), mu = parseInt($('mult').value, 10);
+  if (!(stake > 0) || !(mu > 0)) return alert('Check stake and multiplier.');
+  cfg = { ...Strat.DEFAULTS, stake, multiplier: mu };
+  symbols = $('symbols').value.split(',').map((s) => s.trim()).filter(Boolean);
+  if (!symbols.length) return alert('Add at least one symbol.');
+  $('startBtn').disabled = true; $('dash').style.display = ''; setStatus('Connecting...');
+  risk = null; tradesToday = 0;
+  try {
+    running = true; await connect(); await keepAwake();
+    $('startBtn').style.display = 'none'; $('stopBtn').style.display = ''; $('setup').querySelectorAll('input').forEach((i) => (i.disabled = true));
+    renderHist(); updateDash();
+  } catch (e) {
+    running = false; log('Could not start: ' + e.message); setStatus('Could not start: ' + e.message); $('startBtn').disabled = false;
+    try { auth && auth.close(); pub && pub.close(); } catch (x) {}
+  }
+};
+$('stopBtn').onclick = () => {
+  running = false;
+  try { auth.close(); pub.close(); } catch (e) {}
+  try { wakeLock && wakeLock.release(); } catch (e) {}
+  const n = Object.keys(open).length;
+  log('Stopped.' + (n ? ` ${n} open trade(s) will close by their own TP/SL on Deriv.` : ''));
+  setStatus('Stopped.'); $('stopBtn').style.display = 'none'; $('startBtn').style.display = ''; $('startBtn').disabled = false;
+  $('setup').querySelectorAll('input').forEach((i) => (i.disabled = false));
+};
+renderHist();
+</script>
+</body>
+</html>
